@@ -1,0 +1,87 @@
+name: Windows RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 195
+
+    steps:
+      - name: Enable Remote Desktop
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Restart-Service -Name TermService -Force
+
+      - name: Rename Computer
+        shell: powershell
+        run: |
+          Rename-Computer -NewName "AI-STV" -Force
+
+      - name: Create RDP User
+        shell: powershell
+        run: |
+          $rdpUser = "UserXU8KGL"
+          $rdpPass = "4n0B6xWItpWgeQ"
+          $securePass = ConvertTo-SecureString $rdpPass -AsPlainText -Force
+          if (Get-LocalUser -Name $rdpUser -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $rdpUser }
+          New-LocalUser -Name $rdpUser -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $rdpUser
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $rdpUser
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $file = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest $url -OutFile $file -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i $file /quiet /norestart" -Wait
+
+      - name: Wait for Tailscale service
+        shell: powershell
+        run: |
+          for ($i = 0; $i -lt 20; $i++) {
+            $svc = Get-Service Tailscale -ErrorAction SilentlyContinue
+            if ($svc.Status -eq "Running") {
+              Write-Host "Tailscale service running"
+              break
+            }
+            Write-Host "Waiting for service..."
+            Start-Sleep -Seconds 3
+          }
+
+      - name: Connect Tailscale
+        shell: powershell
+        run: |
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          & $tsExe up --authkey "tskey-auth-k8izGjjzBE11CNTRL-kLoMhf6Sg4S2wnHd8cPw3S3wd7nVwJWCK" --hostname "github-rdp-${{ github.run_id }}" --accept-dns=false
+
+      - name: Wait for Tailscale IP
+        shell: powershell
+        run: |
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 5
+            $ip = (& $tsExe ip -4 2>$null | Select-Object -First 1).Trim()
+            if ($ip) {
+              Write-Host "Tailscale connected: $ip"
+              Set-Content -Path "$env:GITHUB_WORKSPACE\tailscale_ip.txt" -Value $ip
+              break
+            }
+            Write-Host "Waiting for Tailscale IP..."
+          }
+
+      - name: Upload IP
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-ip
+          path: tailscale_ip.txt
+
+      - name: Keep Session Alive
+        shell: powershell
+        run: |
+          Write-Host "Session active for 180 minutes..."
+          Start-Sleep -Seconds 10800
